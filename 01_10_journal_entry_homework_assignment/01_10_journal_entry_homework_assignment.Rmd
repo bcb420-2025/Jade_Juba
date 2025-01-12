@@ -1,0 +1,27 @@
+---
+title: "R Notebook - Journal entry homework assignment"
+output: html_notebook
+---
+
+```{r}
+# generating a 5 x 10 matrix full of random integers from 1 to 200
+gene_matrix <- matrix(sample((1:200), 50, replace = TRUE), nrow = 5)
+
+# defining column and row names
+colnames(gene_matrix) <- c(paste0("cond", 1:5), paste0("ctrl", 1:5))
+rownames(gene_matrix) <- c(paste0("gene", 1:5))
+
+# generating a new matrix containing all genes, where each column represents the condition value divided by the control value (5 columns total)
+cond_means <- rowMeans(gene_matrix[, 1:5])
+ctrl_means <- rowMeans(gene_matrix[, 6:10])
+
+fold_changes <- cond_means / ctrl_means
+names(fold_changes) <- rownames(gene_matrix)
+
+# printing gene_matrix and fold_changes
+paste("Gene matrix:")
+gene_matrix
+paste("Fold changes (conditions / controls):")
+fold_changes
+
+```
