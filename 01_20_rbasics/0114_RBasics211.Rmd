@@ -1,0 +1,114 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Execute a chunk: *Ctrl+Shift+Enter*
+Adding a chunk: *Ctrl+Alt+I*
+Preview HTML file saved alongside Notebook: *Ctrl+Shift+K*
+Previewing the HTML does not run all chunks. The  output of the chunk when it was last run in the editor is displayed.
+
+```{r}
+library()
+```
+
+library() opened a window that listed the R packages installed on my computer in the in library ‘/usr/local/lib/R/site-library’.
+
+```{r}
+search()
+```
+
+Outputs which libraries are currently loaded.
+
+```{r}
+?vignette
+```
+
+Opens R Documentation for viewing, listing, or getting the R source of package vignettes. A vignette is the documentation PDF for different packages.
+
+```{r}
+install.packages("seqinr",repos="https://cran.rstudio.com/")   
+```
+
+Installs seqinr. Only needed to be ran once.
+
+```{r}
+library(seqinr)
+ls("package:seqinr")
+```
+
+Load seqinr and lists all functions in the package.
+
+```{r}
+?seqinr::a
+```
+
+Opens the description of function a in the Help panel. a converts 3-letter amino acid codes into 1-letter symbols.
+
+```{r}
+seqinr::a("Tyr")
+```
+Outputs the single-letter code for Tyr (tyrosine), which is Y.
+
+```{r}
+seqinr::words(3, c("A", "G", "C", "U"))
+```
+
+This function seems to output all possible 3-letter nucleotide sequences which can be produced from the nucleotides A, G, C, U. I'll call up the help documentation for seqinr::words to make sure I'm right.
+
+```{r}
+?seqinr::words
+```
+
+The help documentation states this function "gets all words" of a defined length "from an alphabet" that is defined within the function. So in this case, the alphabet is ACGU and the word length is 3, producing all possible 3-unit combinations of the letters ACGU.
+
+```{r}
+?data
+```
+
+This brings up the help documentation for data, which loads data sets or lists data sets which are available in a package.
+
+```{r}
+data(package="seqinr")
+```
+
+seqinr contains several data sets, including the chemical and biological properties of all 20 amino acids (aaindex), 999 coding sequences from E. coli (ec999), and light absorption by the water column in spectroscopy (waterabs).
+
+```{r}
+data(aaindex, package="seqinr")
+?aaindex
+```
+
+aaindex is described above. More specifically, it is a list of 544 indices related to specific properties of the 20 amino acids. These indices include partition energies, hydrophobicities, weights, composition in different classes of proteins, and much more.
+
+```{r}
+aaindex$FASG890101
+```
+
+```{r}
+aaindex$PONJ960101 
+```
+
+These are two different indices in aaindex. The first contains information on hydrophobicity and the second on the average volume of residues.
+
+```{r}
+plot(aaindex$FASG890101$I,   # x values
+     aaindex$PONJ960101$I,   # y values
+     xlab="hydrophobicity", ylab="volume", type="n")
+text(aaindex$FASG890101$I,
+     aaindex$PONJ960101$I,
+     labels=a(names(aaindex$FASG890101$I)))
+```
+
+Uses information from the two indices to plot amino acid hydrophobicity against volume, with the single-letter codes denoting an AA's placement on the plot.
+
+```{r}
+seqinr::choosebank("swissprot")   # choosing a database to take a sequence from
+mySeq <- seqinr::query("mySeq", "N=MBP1_YEAST")   # taking a sequence from yeast
+mbp1 <- seqinr::getSequence(mySeq)
+seqinr::closebank()
+x <- seqinr::AAstat(mbp1[[1]])   # AAstat returns information about protein residues and their                                      chemical and biological classes
+barplot(sort(x$Compo), cex.names = 0.6)   # bar plot of amino acid counts in our sequence
+```
+
+This chunk takes a yeast sequence and generates plots based on data about the frequency of residues in the sequence and their biochemical properties.
