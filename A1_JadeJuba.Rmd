@@ -1,0 +1,337 @@
+---
+title: "Assignment 1: Dataset selection and initial processing"
+author: "Jade Juba"
+date: "2025-02-11"
+output:
+  html_document:
+    toc: TRUE
+    toc_depth: 2
+bibliography: assignment1_bibliography.bib
+csl: nature.csl
+---
+
+```{r setup, include=FALSE}
+# will not be shown in the knitted html file
+
+# installing and loading required packages
+install.packages("reshape")
+library(GEOquery)
+library(knitr)
+library(edgeR)
+library(ggplot2)
+library(reshape)
+library(biomaRt)
+library(magrittr)
+library(kableExtra)
+library(limma)
+
+# ensuring all code, unless otherwise stated, appears in the RMarkdown document, but no warnings do
+opts_chunk$set(echo = TRUE)
+opts_chunk$set(warnings = FALSE)
+```
+
+Assignment questions about control/test conditions and why the dataset interested me are answered in the **Introduction**. All other  questions are answered in the **Discussion**.
+
+# Introduction
+
+I chose the dataset titled [Deciphering the host transcriptional response to SARS-CoV-2 infection](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE166530), associated with the paper [Host transcriptional response to SARS-CoV-2 infection in COVID-19 patients](https://doi.org/10.1002/ctm2.534)[@singh2021]. This dataset consists of 41 nasopharyngeal or oropharyngeal swab samples from patients which were COVID-19 positive (36 samples) and COVID-19 negative (5 samples). Most of the COVID-19 positive samples can be further broken down by the severity of the illness for the patients: out of 30 samples with known severity, 7 are from patients who were admitted to an ICU, and 23 are from patients who did not require hospital care. Naturally, the COVID-19 positive samples represent the test samples, and the COVID-19 negative samples are control samples. In analyzing this data, Singh et al. sought to characterize transcriptional changes associated with COVID-19.
+
+This dataset is of interest to me because, while it is related to SARS-CoV-2, the authors cast a broad scope. I think I will enjoy analyzing the transcriptional data they gathered, figuring out which changes are meaningful, and linking them back to the effects of SARS-CoV-2 infection. Transcriptomics has the potential to elucidate some of the mechanisms by which COVID-19 symptoms manifest; for example, Singh et al. state they found "a reduction in the gene expression profiles associated with cardiac, muscular, [...] neurological processes, [and] peripheral neurosensory markers,"[@singh2021] which may relate to the negative effects COVID-19 has on these systems. While SARS-CoV-2 and COVID-19 has been heavily studied over the past five years, there is still much to be uncovered about this virus and disease, and studies like these are foundational in understanding its molecular effects.
+
+# Analysis
+
+## Getting the data
+
+First, I'll pull the description of my data from GEO using GEOquery[@geoquery].
+
+```{r getting_data, message = FALSE}
+# message = FALSE because a lot of text will appear otherwise
+geo_accession <- "GSE166530"
+
+# pulling descriptive data, including platform data, from GEO
+gse <- getGEO(geo_accession, GSEMatrix = FALSE) 
+platform <- names(GPLList(gse))[1]
+platform_info <- Meta(getGEO(platform))
+
+# printing some of the information
+platform_info$title
+platform_info$technology
+```
+
+The platform data shows that this RNA sequencing data was generated with Illumina next-generation technology, which GEO classifies as high-throughput. This information is also stated in the supplementary Methods information of the paper. What is more relevant for our purposes is that Illumina is a short-read technology, meaning most reads should be <500 bp long[@buermans2014].
+
+Now, I will pull the supplemental files associated with this GEO accession.
+
+```{r}
+gse_supp_files = getGEOSuppFiles(geo_accession, fetch_files = FALSE)
+gse_supp_files$fname
+```
+
+There is only one supplementary file, which seems to be a .tar (bundled, like a .zip) of the raw data.
+
+```{r}
+file_name <- gse_supp_files$fname[1]
+file_name
+```
+We will now download this file.
+
+```{r}
+directory <- file.path(getwd()) # location to download the file to
+
+# checking if the file is already downloaded, and only downloading the file if we don't have it
+missing_files <- gse_supp_files$fname[!unlist(lapply(gse_supp_files$fname, FUN=function(x){file.exists(file.path(directory,geo_accession,x))}))]
+
+# if the file is not already downloaded
+if(length(missing_files) > 0){ 
+  for(i in 1:length(missing_files)){
+    #get the supplementary files
+    downloaded_supp_files = getGEOSuppFiles(geo_accession,
+                             filter_regex = missing_files[i],
+                             baseDir = directory,
+                             fetch_files = TRUE)
+    }
+}
+
+```
+
+Because the supplementary file is a .tar file, we have to "untar" it to access the text files within.
+
+```{r}
+untar(file.path(directory,geo_accession,file_name), list = TRUE)
+```
+
+It looks like each sample is a different .txt file. This would be difficult to work with. Luckily, the GEO accession we are interested in has NCBI-generated raw counts matrix that combines all the data from these separate files. Let's download it.
+
+```{r}
+url <- "https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&acc=GSE166530&format=file&file=GSE166530_raw_counts_GRCh38.p13_NCBI.tsv.gz"
+download.file(url, destfile = file.path(directory,geo_accession,"GSE166530_raw_counts_GRCh38.p13_NCBI.tsv.gz"))
+
+# changing file_name to reflect this new name
+file_name <- "GSE166530_raw_counts_GRCh38.p13_NCBI.tsv.gz"
+```
+
+## Formatting the data
+
+We will now check to see if this file contains all the data we'd expect.
+
+```{r}
+rnaseq_data <- read.table(file.path(directory, geo_accession, file_name), header = TRUE, check.names = FALSE)
+dim(rnaseq_data)
+```
+
+There are only 34 samples in this table (one column is gene IDs). Upon further inspection, this file is missing one COVID-19 negative sample and 6 COVID-19 positive samples. We will proceed with this dataset anyway.
+
+Here's a sample of our data, generates with a knitr[@knitr] function:
+
+```{r}
+kable(rnaseq_data[1:10,1:10], format = "html")
+```
+
+Each column represents one patient. From the supplementary data attached to the GEO accession, I know the first four samples are from COVID-19 negative patients, and the rest are from COVID-19 positive patients. I'm going to create a dataframe where each sample is associated with the COVID-19 status of that patient.
+
+```{r}
+samples <- as.data.frame(matrix(nrow = 34, ncol = 0)) # there are 34 samples, and I want each in its own row
+samples$Patient_ID <- (colnames(rnaseq_data[2:35])) # skipping the first column because it's the gene names
+samples$COVID19_Status <- (c(rep("Negative", 4), rep("Positive", 30)))
+samples
+```
+
+In our RNA-seq count dataframe, the first column consists of the gene IDs, when ideally, this information should be contained in the row names. I turn the RNA-seq count dataframe into a matrix and make this change.
+
+```{r}
+rna_matrix <- as.matrix(rnaseq_data)
+# formatting the matrix so the gene IDs are row names
+rownames(rna_matrix) <- rna_matrix[,1] # setting column 1 data, which are the gene IDs, as the row names
+rna_matrix <- rna_matrix[,-1] # removing column 1
+
+# printing a sample of the matrix
+rna_matrix[1:20,1:5]
+```
+
+## Filtering
+
+Before normalizing our data, we must filter it. This involves removing genes which are not well-represented by our data.
+
+We will define the minimum number of samples a gene must be expressed in to be analyzed. Because our COVID-19 negative condition has so few samples (4), our minimum number of samples will be 4.
+
+```{r}
+min_num_samples <- 4
+
+# keeping the rows (genes) that appear in >= 4 samples
+keep = rowSums(cpm(rna_matrix) > 1) > min_num_samples
+filtered_rna_matrix = rna_matrix[keep,]
+
+# printing a sample of the matrix
+filtered_rna_matrix[1:20,1:5]
+
+# seeing how many rowa (genes) are left
+nrow(filtered_rna_matrix)
+```
+
+We went from 39,376 genes to 16,947.
+
+Visualizing the effect of filtering by plotting the number of counts (in log scale) against density[@ggplot2,@reshape]:
+
+```{r, message = FALSE}
+# changing the unfiltered data into a format that can be used for ggplot
+gg_unfilt <- melt(as.data.frame(rna_matrix), variable.name = "Gene ID", value.name = "Count")
+unfilt_plot <- ggplot(gg_unfilt, aes(x = gg_unfilt$value)) +
+  geom_density() + scale_x_log10() +  # log scale to better visualize distribution
+  labs(title = "RNA-seq count distribution before filtering",
+       x = "Raw counts (log scale)", y = "Density") +
+  theme_minimal()
+print(unfilt_plot)
+
+# doing the same for filtered data
+gg_filt <- melt(as.data.frame(filtered_rna_matrix), variable.name = "Gene ID", value.name = "Count")
+filt_plot <- ggplot(gg_filt, aes(x = gg_filt$value)) + geom_density() + scale_x_log10() +
+  labs(title = "RNA-seq count distribution after filtering",
+       x = "Raw counts (log scale)", y = "Density") +
+  theme_minimal()
+print(filt_plot)
+```
+
+After filtering, there is much less noise in the density of low count levels, and the peak density shifts as we've removed genes for which there were no counts for >4 of the conditions.
+
+## Normalization
+
+I am now creating an edgeR[@edger] container for RNASeq count data, calculating the normalization factors, and creating a table of normalized counts.
+
+```{r}
+# grouping data by COVID-19 status, then calculating normalization factors
+d = DGEList(counts=filtered_rna_matrix, group=samples$COVID19_Status)
+d = calcNormFactors(d)
+# normalizing the data
+normalized_counts <- cpm(d)
+normalized_counts[1:20,1:5]
+```
+
+Visualizing the results of normalization:
+
+```{r}
+# the unnormalized data is just the filtered data, so we use the same data as we used to generate the filtered counts plot
+unnorm_plot <- ggplot(gg_filt, aes(x = gg_filt$value)) +  geom_density() + scale_x_log10() +
+  labs(title = "RNA-seq count distribution before normalization",
+       x = "Raw counts (log scale)", y = "Density") +
+  theme_minimal()
+print(unnorm_plot)
+
+# we do have to format the normalized data to be used for ggplot
+gg_norm <- melt(as.data.frame(normalized_counts), variable.name = "Gene ID", value.name = "Count")
+norm_plot <- ggplot(gg_norm, aes(x = gg_norm$value)) + geom_density() + scale_x_log10() +
+  labs(title = "RNA-seq count distribution after normalization",
+       x = "Raw counts (log scale)", y = "Density") +
+  theme_minimal()
+print(norm_plot)
+```
+
+Our normalized data has a smaller spread and a more pronounced peak of density, although at low expression levels there is some noise.
+
+Visualizing overall differences between COVID-19 negative and positive patients with a multidimensional scaling plot[@limma], which reduces the RNA-seq data into two dimensions, with distances between samples (dots) representing how similar (close) or different (farther apart) the sample's transcriptome is:
+
+```{r}
+# making a scatterplot with limma
+plotMDS(d, labels=NULL, pch = 1, col = c("red","blue")[factor(samples$COVID19_Status)])
+legend("topleft", legend = levels(factor(samples$COVID19_Status)), pch=c(1), col= c("red","blue"),title="COVID19 status", bty = 'n', cex = 0.75)
+```
+
+COVID-19 negative samples are pretty close together on this plot, separate from the bulk of COVID-19 positive samples. This shows all that there are enough differences between COVID-19 negative and COVID-19 positive samples for them to group separately in this plot. Note that COVID-19 positive samples are more dispersed, indicating more variance, whereas COVID-19 negative samples occupy a smaller area by comparison; there are less COVID-19 negative samples, but the lack of spread indicates these samples are quite similar.
+
+Looking at dispersion (biological coefficient of variation), which plots the relationship between a gene's average expression level across samples of the same type and the gene's variability to show how much variation exists between samples of the same type:
+
+```{r}
+model_design <- model.matrix(~samples$COVID19_Status)
+d <- estimateDisp(d, model_design)
+plotBCV(d,col.tagwise = "black",col.common = "red",)
+```
+
+On average, genes with lower expression in our sample have a little more variance, but the bulk of genes have relatively low variance and are hovering around the common trendline. Highly expressed genes have a pretty dispersed variance with no real trend to them, and we can see here that there are few genes which are highly expressed in our samples.
+
+## Identifier mapping
+
+We will use biomaRt[@biomart] to map the gene IDs in our dateset (NCBI/Entrez IDs) to HUGO Symbols.[@magrittr,@kableextra]
+
+```{r}
+ensembl <- useMart("ensembl")
+ensembl = useDataset("hsapiens_gene_ensembl",mart = ensembl)
+biomart_human_filters <- listFilters(ensembl)
+
+# generating a readable table of the filters we can use, but only ones which contain the keyword entrez
+kable(biomart_human_filters[grep(biomart_human_filters$name, pattern="entrez"), ], format="html") %>% row_spec(1)
+```
+
+It looks like "entrezgene_id" is what we are looking for. Now, we will perform the mapping of Entrez IDs to HUGO Symbols.
+
+```{r}
+ids2convert <- rownames(normalized_counts)
+#check to see if id_conversion file exists (computationally intensive)
+conversion_stash <- "id_conversion.rds"
+if(file.exists(conversion_stash)){
+  id_conversion <- readRDS(conversion_stash)
+  } else {
+    id_conversion <- getBM(attributes = c("entrezgene_id","hgnc_symbol"), filters = c("entrezgene_id"), values = ids2convert, mart = ensembl)
+    saveRDS(id_conversion, conversion_stash)
+  }
+```
+
+We mapped the following number of genes:
+
+```{r}
+length(which(rownames(normalized_counts) %in%
+id_conversion$entrezgene_id))
+```
+And we started with:
+
+```{r}
+nrow(normalized_counts)
+```
+Giving us a difference of:
+
+```{r}
+nrow(normalized_counts) - length(which(rownames(normalized_counts)
+%in% id_conversion$entrezgene_id))
+```
+
+Unfortunately, this number is rather high. It could be due to the fact that we used an NBI-generated table of RNA-seq counts; however, NCBI probably has accurate identifiers for their own data. It may be an intrinsic caveat of mapping from Entrez IDs to HUGO Symbols; perhaps it is because NCBI and HUGO have different rules about what counts as a gene, therefore some NCBI genes have no HUGO equivalent. 
+
+Now we will merge our new identifiers:
+
+```{r}
+annot_normalized_counts <- merge(id_conversion, normalized_counts, by.x = 1, by.y = 0, all.y = TRUE)
+kable(annot_normalized_counts[1:20,1:8],type = "html")
+```
+
+Checking for duplicates:
+
+```{r}
+# finding number of duplicate entrez IDs
+entrez_IDs <- annot_normalized_counts$entrezgene_id
+sum(duplicated(entrez_IDs))
+
+# creating new table without duplicates
+cleaned_annot_counts <- annot_normalized_counts[!duplicated(annot_normalized_counts$entrezgene_id),]
+# checking number of rows of both dataframes
+nrow(annot_normalized_counts)
+nrow(cleaned_annot_counts)
+
+```
+There are 102 duplicate Entrez IDs. I created a new dataframe without the duplicates and checked that the number of rows reduced accordingly.
+
+# Discussion
+
+Of 41 samples associated with the GEO accession for this dataset, only 34 were available in the NCBI-generated RNA-seq count data .csv file. This includes 4 COVID-19 negative samples and 30 COVID-19 positive samples.
+
+Before normalization, our data was cleaned and outliers were removed. I removed all genes which were not expressed in at least 4 samples. This is not very stringent, but for one of the conditions (COVID-19 negative), there was only 4 samples, so I did not want to go above this number. This removed 22,429 genes. The normalization process, which was done through the edgeR cpm() function, tightened the distribution of our counts, as seen in the following figures:
+
+```{r, message = FALSE}
+unfilt_plot
+filt_plot
+unnorm_plot
+norm_plot
+```
+
+In the paper associated with this dataset[@singh2021], the authors do not mention how they dealed with outliers. They mention discarding genes with zero counts, then performing differential gene expression analysis on 56640 genes (more genes than contained in the .csv of RNA-seq raw count data which we downloaded), then continuing on with further analysis on 9319 genes determined to be differentially expressed. 
+
+The dataset did not contain any expression values that were not unique to specific genes. Every expression value present in the RNA-seq count file was associated with an NCBI Entrez Gene ID. If these did exist in my dataset, I likely would have discarded them, as interpreting what they may represent would be too computationally taxing unless there were only a few instances of this.
+
+There were 1552 genes out of 16947 that could not be mapped to a HUGO Symbol. This value is quite high. It seems NCBI Entrez Gene IDs are not as popularly used as Ensembl IDs, and it might be because of poor mapping between Entrez IDs and other systems of identification like HUGO. Furthermore, there were 102 duplicate Entrez Gene ID values after mapping, which I removed from our cleaned dataframe.
